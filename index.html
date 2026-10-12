@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crypto Dashboard</title>
+<style>
+  :root { --bg:#14151a; --card:#1e2026; --text:#eaecef; --muted:#848e9c; --up:#0ecb81; --down:#f6465d; --warn:#f0b90b; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--text); font-family:-apple-system,system-ui,Segoe UI,Roboto,sans-serif; }
+  header { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:12px; }
+  h1 { font-size:18px; margin:0; }
+  #status { font-size:12px; color:var(--muted); }
+  table { width:100%; border-collapse:collapse; background:var(--card); border-radius:10px; overflow:hidden; }
+  th, td { padding:10px 12px; text-align:right; font-size:14px; }
+  th:first-child, td:first-child { text-align:left; }
+  th { color:var(--muted); font-weight:500; font-size:12px; cursor:pointer; user-select:none; border-bottom:1px solid #2b2f36; }
+  tr:not(:last-child) td { border-bottom:1px solid #262a31; }
+  .sym { font-weight:600; }
+  .up { color:var(--up); } .down { color:var(--down); }
+  .rsi { font-weight:600; }
+  .rsi small { display:block; font-weight:400; font-size:10px; color:var(--muted); }
+  .err { color:var(--down); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Crypto Dashboard <span style="color:var(--muted);font-weight:400">· RSI 14 · 4h</span></h1>
+  <div id="status">Loading…</div>
+</header>
+<table>
+  <thead>
+    <tr>
+      <th data-k="sym">Coin</th>
+      <th data-k="price">Price (USDT)</th>
+      <th data-k="chg">24h</th>
+      <th data-k="rsi">RSI (4h)</th>
+    </tr>
+  </thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<script>
+const COINS = ['BTC','ETH','BNB','XRP','SOL','ADA','DOGE','TRX','AVAX','LINK','SUI','LTC','ONDO','ENA','PEPE','QNT'];
+const REFRESH_MS = 60000;       // refresh every 60 seconds
+const RSI_PERIOD = 14;
+const INTERVAL = '4h';
+const HOSTS = ['https://api.binance.com', 'https://data-api.binance.vision'];
+
+let data = {};
+let sortKey = null, sortDir = -1;
+
+async function getJSON(path) {
+  let lastErr;
+  for (const h of HOSTS) {
+    try {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 8000);
+      const r = await fetch(h + path, {signal: ctl.signal});
+      clearTimeout(timer);
+      if (r.ok) return await r.json();
+      lastErr = new Error(h + ' → ' + r.status);
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr;
+}
+
+// Wilder's RSI (same method as TradingView / Binance)
+function rsi(closes, period = RSI_PERIOD) {
+  if (closes.length <= period) return null;
+  let gain = 0, loss = 0;
+  for (let i = 1; i <= period; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (d >= 0) gain += d; else loss -= d;
+  }
+  let avgG = gain / period, avgL = loss / period;
+  for (let i = period + 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    avgG = (avgG * (period - 1) + Math.max(d, 0)) / period;
+    avgL = (avgL * (period - 1) + Math.max(-d, 0)) / period;
+  }
+  if (avgL === 0) return 100;
+  return 100 - 100 / (1 + avgG / avgL);
+}
+
+function fmtPrice(p) {
+  if (p >= 1000) return p.toLocaleString(undefined, {maximumFractionDigits: 1});
+  if (p >= 1)    return p.toFixed(2);
+  if (p >= 0.01) return p.toFixed(4);
+  return p.toFixed(8);
+}
+
+async function refresh() {
+  const status = document.getElementById('status');
+  try {
+    const symbols = JSON.stringify(COINS.map(c => c + 'USDT'));
+    const tickers = await getJSON('/api/v3/ticker/24hr?symbols=' + encodeURIComponent(symbols));
+    for (const t of tickers) {
+      const c = t.symbol.replace('USDT', '');
+      data[c] = Object.assign(data[c] || {sym: c}, {
+        price: parseFloat(t.lastPrice),
+        chg: parseFloat(t.priceChangePercent)
+      });
+    }
+    render();
+    await Promise.all(COINS.map(async c => {
+      try {
+        const k = await getJSON(`/api/v3/klines?symbol=${c}USDT&interval=${INTERVAL}&limit=200`);
+        data[c].rsi = rsi(k.map(x => parseFloat(x[4])));
+      } catch (e) { /* keep old RSI */ }
+    }));
+    render();
+    status.textContent = 'Updated ' + new Date().toLocaleTimeString();
+    status.className = '';
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+    status.className = 'err';
+  }
+}
+
+function render() {
+  let list = COINS.map(c => data[c]).filter(Boolean);
+  if (sortKey) list.sort((a, b) => sortKey === 'sym'
+    ? sortDir * a.sym.localeCompare(b.sym)
+    : sortDir * ((a[sortKey] ?? -1e9) - (b[sortKey] ?? -1e9)));
+  document.getElementById('rows').innerHTML = list.map(d => {
+    const r = d.rsi;
+    const rc = r == null ? '' : r >= 70 ? 'down' : r <= 35 ? 'up' : '';
+    const tag = r == null ? '' : r >= 70 ? 'overbought' : r <= 35 ? 'oversold' : '';
+    return `<tr>
+      <td class="sym">${d.sym}</td>
+      <td>${fmtPrice(d.price)}</td>
+      <td class="${d.chg >= 0 ? 'up' : 'down'}">${d.chg >= 0 ? '+' : ''}${d.chg.toFixed(2)}%</td>
+      <td class="rsi ${rc}">${r == null ? '…' : r.toFixed(1)}${tag ? `<small>${tag}</small>` : ''}</td>
+    </tr>`;
+  }).join('');
+}
+
+document.querySelectorAll('th').forEach(th => th.addEventListener('click', () => {
+  const k = th.dataset.k;
+  if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = k === 'sym' ? 1 : -1; }
+  render();
+}));
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>
